@@ -2,18 +2,27 @@ const express = require('express');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 
 const app = express();
+const PORT = process.env.PORT || 10000; // Render assigns a port automatically
 
-const rewriteCSS = (css, baseURL) => {
-    return css.replace(/url\(["']?(.*?)["']?\)/g, (match, url) => {
+// Middleware to rewrite URLs inside proxied content
+const rewriteHTML = (body, target) => {
+    return body.replace(/(href|src|action)=["'](.*?)["']/g, (match, attr, url) => {
+        if (url.startsWith('http') || url.startsWith('data:') || url.startsWith('#')) return match;
+        return `${attr}="/proxy/${encodeURIComponent(new URL(url, target).href)}"`;
+    });
+};
+
+const rewriteCSS = (body, target) => {
+    return body.replace(/url\(["']?(.*?)["']?\)/g, (match, url) => {
         if (url.startsWith('http') || url.startsWith('data:')) return match;
-        return `url("/proxy/${encodeURIComponent(new URL(url, baseURL).href)}")`;
+        return `url("/proxy/${encodeURIComponent(new URL(url, target).href)}")`;
     });
 };
 
 app.use('/proxy/:url(*)', async (req, res, next) => {
     const target = decodeURIComponent(req.params.url);
 
-    // Prevent infinite loops
+    // Prevent infinite loops by blocking self-referencing requests
     if (target.includes(req.get('host'))) {
         return res.status(400).send('Proxy loop detected.');
     }
@@ -24,13 +33,13 @@ app.use('/proxy/:url(*)', async (req, res, next) => {
         target: target.startsWith('http') ? target : `https://${target}`,
         changeOrigin: true,
         selfHandleResponse: true,
-        onProxyRes: async (proxyRes, req, res) => {
+        onProxyRes: (proxyRes, req, res) => {
             let body = '';
             proxyRes.on('data', chunk => (body += chunk));
-            proxyRes.on('end', async () => {
+            proxyRes.on('end', () => {
                 res.writeHead(proxyRes.statusCode, {
                     ...proxyRes.headers,
-                    'access-control-allow-origin': '*',
+                    'access-control-allow-origin': '*', // Allow resources to load
                     'content-security-policy': "default-src * 'unsafe-inline' 'unsafe-eval' data:",
                     'x-frame-options': 'ALLOWALL'
                 });
@@ -38,18 +47,8 @@ app.use('/proxy/:url(*)', async (req, res, next) => {
                 const contentType = proxyRes.headers['content-type'] || '';
 
                 if (contentType.includes('text/html')) {
-                    // Fix relative links
-                    body = body.replace(/(href|src)=["'](.*?)["']/g, (match, attr, link) => {
-                        if (link.startsWith('http') || link.startsWith('data:')) return match;
-                        return `${attr}="/proxy/${encodeURIComponent(new URL(link, target).href)}"`;
-                    });
-
-                    // Fix redirect headers
-                    if (proxyRes.headers['location']) {
-                        res.setHeader('location', `/proxy/${encodeURIComponent(proxyRes.headers['location'])}`);
-                    }
+                    body = rewriteHTML(body, target);
                 } else if (contentType.includes('text/css')) {
-                    // Fix CSS imports
                     body = rewriteCSS(body, target);
                 }
 
@@ -65,6 +64,6 @@ app.use('/proxy/:url(*)', async (req, res, next) => {
     proxy(req, res, next);
 });
 
-app.listen(8080, () => {
-    console.log('Proxy server running on http://localhost:8080');
+app.listen(PORT, () => {
+    console.log(`Proxy server running on port ${PORT}`);
 });
