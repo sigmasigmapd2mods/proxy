@@ -1,9 +1,16 @@
 const express = require('express');
 const { createProxyMiddleware } = require('http-proxy-middleware');
-const { JSDOM } = require('jsdom'); // To modify HTML responses
-const url = require('url');
+const { JSDOM } = require('jsdom');
 
 const app = express();
+
+// Function to rewrite URLs inside CSS
+const rewriteCSS = (css, baseURL) => {
+    return css.replace(/url\(["']?(.*?)["']?\)/g, (match, url) => {
+        if (url.startsWith('http') || url.startsWith('data:')) return match;
+        return `url("/proxy/${encodeURIComponent(new URL(url, baseURL).href)}")`;
+    });
+};
 
 app.use('/proxy/:url(*)', async (req, res, next) => {
     const target = decodeURIComponent(req.params.url);
@@ -12,10 +19,9 @@ app.use('/proxy/:url(*)', async (req, res, next) => {
     const proxy = createProxyMiddleware({
         target: target.startsWith('http') ? target : `https://${target}`,
         changeOrigin: true,
-        selfHandleResponse: true, // Allows us to modify responses
+        selfHandleResponse: true, // Lets us modify responses
         onProxyRes: async (proxyRes, req, res) => {
             let body = '';
-
             proxyRes.on('data', chunk => (body += chunk));
             proxyRes.on('end', async () => {
                 res.writeHead(proxyRes.statusCode, {
@@ -25,16 +31,17 @@ app.use('/proxy/:url(*)', async (req, res, next) => {
                     'x-frame-options': 'ALLOWALL'
                 });
 
-                // Only modify HTML responses
-                if (proxyRes.headers['content-type'] && proxyRes.headers['content-type'].includes('text/html')) {
+                const contentType = proxyRes.headers['content-type'] || '';
+
+                if (contentType.includes('text/html')) {
+                    // Modify HTML to rewrite links & scripts
                     try {
                         const dom = new JSDOM(body);
                         const document = dom.window.document;
 
-                        // Fix relative links
                         document.querySelectorAll('a, link, script, img, iframe, form').forEach(el => {
                             let attr = el.tagName === 'FORM' ? 'action' : 'href';
-                            if (el.tagName === 'SCRIPT' || el.tagName === 'IMG' || el.tagName === 'IFRAME') attr = 'src';
+                            if (['SCRIPT', 'IMG', 'IFRAME', 'LINK'].includes(el.tagName)) attr = 'src';
 
                             if (el[attr] && !el[attr].startsWith('http') && !el[attr].startsWith('data:')) {
                                 el[attr] = `/proxy/${encodeURIComponent(new URL(el[attr], target).href)}`;
@@ -45,6 +52,9 @@ app.use('/proxy/:url(*)', async (req, res, next) => {
                     } catch (err) {
                         console.error('HTML Rewrite Error:', err);
                     }
+                } else if (contentType.includes('text/css')) {
+                    // Rewrite CSS URLs
+                    body = rewriteCSS(body, target);
                 }
 
                 res.end(body);
