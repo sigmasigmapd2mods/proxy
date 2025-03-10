@@ -1,35 +1,29 @@
 const express = require('express');
-const { createProxyMiddleware } = require('http-proxy-middleware');
-
+const puppeteer = require('puppeteer');
 const app = express();
 const PORT = process.env.PORT || 10000; // Render assigns a port automatically
 
-app.use('/proxy/:url(*)', (req, res, next) => {
+app.use('/proxy-render/:url(*)', async (req, res) => {
     const target = decodeURIComponent(req.params.url);
 
-    // Prevent infinite loops
-    if (target.includes(req.get('host'))) {
-        return res.status(400).send('Proxy loop detected.');
+    try {
+        const browser = await puppeteer.launch({ headless: true });
+        const page = await browser.newPage();
+
+        // Wait until the page is fully loaded (including JS execution)
+        await page.goto(target, { waitUntil: 'domcontentloaded' });
+
+        // Get the fully rendered HTML content
+        const content = await page.content();
+
+        // Send the rendered HTML to the client
+        res.send(content);
+
+        await browser.close();
+    } catch (err) {
+        console.error(`Error rendering page: ${err.message}`);
+        res.status(500).send('Error rendering page with JavaScript.');
     }
-
-    console.log(`Proxying request to: ${target}`);
-
-    const proxy = createProxyMiddleware({
-        target: target.startsWith('http') ? target : `https://${target}`,
-        changeOrigin: true,
-        selfHandleResponse: false, // Stream the response directly
-        onProxyRes: (proxyRes) => {
-            delete proxyRes.headers['x-frame-options'];
-            delete proxyRes.headers['content-security-policy'];
-            delete proxyRes.headers['access-control-allow-origin'];
-        },
-        onError: (err, req, res) => {
-            console.error(`Proxy error: ${err.message}`);
-            res.status(500).send('Error connecting to target.');
-        }
-    });
-
-    proxy(req, res, next);
 });
 
 app.listen(PORT, () => {
